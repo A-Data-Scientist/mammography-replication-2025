@@ -8,10 +8,12 @@ from cnn_models.cnn_model import CnnModel, test_model_evaluation
 import config
 from data_operations.dataset_feed import create_dataset
 from data_operations.data_preprocessing import calculate_class_weights, dataset_stratified_split, \
-    import_cbisddsm_testing_dataset, import_cbisddsm_training_dataset, import_minimias_dataset
+    import_cbisddsm_testing_dataset, import_cbisddsm_training_dataset, import_minimias_dataset, \
+    import_cbisddsm_patientwise_datasets
 from data_operations.data_transformations import generate_image_transforms
 from utils import create_label_encoder, load_trained_model, print_cli_arguments, print_error_message, \
     print_num_gpus_available, print_runtime, set_random_seeds
+from data_operations.data_preprocessing import encode_labels
 
 
 def main() -> None:
@@ -92,28 +94,53 @@ def main() -> None:
                 print("Validation set size: {}".format(X_val.shape[0]))
             model.train_model(X_train, X_val, y_train, y_val, None)
 
-        # Binary classification (CBIS-DDSM dataset).
-        elif config.dataset == "CBIS-DDSM":
-            images, labels = import_cbisddsm_training_dataset(l_e)
 
-            # Split training dataset into training/validation sets (75%/25% split).
-            X_train, X_val, y_train, y_val = dataset_stratified_split(split=0.25, dataset=images, labels=labels)
+        elif config.dataset == "CBIS-DDSM":
+            if getattr(config, "split_mode", "patient") == "patient":
+                X_train, y_train, X_val, y_val, X_test, y_test = import_cbisddsm_patientwise_datasets(
+                    l_e,
+                    train=getattr(config, "train_frac", 0.70),
+                    val=getattr(config, "val_frac", 0.15),
+                    test=getattr(config, "test_frac", 0.15),
+                    seed=getattr(config, "RANDOM_SEED", 42)
+                )
+            else:
+                images, labels = import_cbisddsm_training_dataset(l_e)
+                X_train, X_val, y_train, y_val = dataset_stratified_split(split=0.25, dataset=images, labels=labels)
+
             train_dataset = create_dataset(X_train, y_train)
             validation_dataset = create_dataset(X_val, y_val)
 
-            # Calculate class weights.
             class_weights = calculate_class_weights(y_train, l_e)
 
-            # Create and train CNN model.
             model = CnnModel(config.model, l_e.classes_.size)
-            # model.load_minimias_fc_weights()
-            # model.load_minimias_weights()
-
-            # Fit model.
-            if config.verbose_mode:
-                print("Training set size: {}".format(X_train.shape[0]))
-                print("Validation set size: {}".format(X_val.shape[0]))
             model.train_model(train_dataset, validation_dataset, None, None, class_weights)
+
+
+
+
+        # # Binary classification (CBIS-DDSM dataset).
+        # elif config.dataset == "CBIS-DDSM":
+        #     images, labels = import_cbisddsm_training_dataset(l_e)
+
+        #     # Split training dataset into training/validation sets (75%/25% split).
+        #     X_train, X_val, y_train, y_val = dataset_stratified_split(split=0.25, dataset=images, labels=labels)
+        #     train_dataset = create_dataset(X_train, y_train)
+        #     validation_dataset = create_dataset(X_val, y_val)
+
+        #     # Calculate class weights.
+        #     class_weights = calculate_class_weights(y_train, l_e)
+
+        #     # Create and train CNN model.
+        #     model = CnnModel(config.model, l_e.classes_.size)
+        #     # model.load_minimias_fc_weights()
+        #     # model.load_minimias_weights()
+
+        #     # Fit model.
+        #     if config.verbose_mode:
+        #         print("Training set size: {}".format(X_train.shape[0]))
+        #         print("Validation set size: {}".format(X_val.shape[0]))
+        #     model.train_model(train_dataset, validation_dataset, None, None, class_weights)
 
         # Save training runtime.
         runtime = round(time.time() - start_time, 2)
@@ -159,7 +186,17 @@ def main() -> None:
 
         # Test binary classification (CBIS-DDSM dataset).
         elif config.dataset == "CBIS-DDSM":
-            images, labels = import_cbisddsm_testing_dataset(l_e)
+            # Use the saved patient-wise test manifest
+            import pandas as pd, os
+            test_manifest = "../data/CBIS-DDSM/splits/patientwise/test.csv"
+            if not os.path.exists(test_manifest):
+                # Fallback to original behavior if manifest not present
+                images, labels = import_cbisddsm_testing_dataset(l_e)
+            else:
+                df = pd.read_csv(test_manifest)
+                images = df["img_path"].astype(str).values
+                labels = encode_labels(df["label"].values, l_e)  # import encode_labels if not in scope
+
             test_dataset = create_dataset(images, labels)
             model = load_trained_model()
             predictions = model.predict(x=test_dataset)
@@ -222,6 +259,10 @@ def parse_command_line_arguments() -> None:
     #                    help="Include this flag to run the grid search algorithm to determine the optimal "
     #                         "hyperparameters for the CNN model."
     #                    )
+    parser.add_argument("--split_mode", choices=["patient", "classic"], default="patient",
+                        help="Use patient-wise split or classic CSV split (CBIS-DDSM only).")
+    parser.add_argument("--splits", default="0.70,0.15,0.15",
+                        help="Train,Val,Test fractions for patient-wise splitting (e.g., 0.70,0.15,0.15).")
     parser.add_argument("-roi", "--roi",
                         action="store_true",
                         default=False,
@@ -240,6 +281,12 @@ def parse_command_line_arguments() -> None:
     config.dataset = args.dataset
     config.mammogram_type = args.mammogramtype
     config.model = args.model
+    config.split_mode = args.split_mode
+    try:
+        t, v, te = [float(x) for x in args.splits.split(",")]
+        config.train_frac, config.val_frac, config.test_frac = t, v, te
+    except Exception:
+        config.train_frac, config.val_frac, config.test_frac = 0.70, 0.15, 0.15
     config.run_mode = args.runmode
     if args.learning_rate <= 0:
         print_error_message()

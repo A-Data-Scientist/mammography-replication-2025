@@ -1,14 +1,19 @@
 import json
-
 import numpy as np
+import os
 import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, log_loss, make_scorer
 from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.losses import BinaryCrossentropy, CategoricalCrossentropy, SparseCategoricalCrossentropy
-from tensorflow.keras.metrics import BinaryAccuracy, CategoricalAccuracy, SparseCategoricalAccuracy
+import tensorflow as tf
+from tensorflow.keras.losses import (
+    BinaryCrossentropy, CategoricalCrossentropy, SparseCategoricalCrossentropy
+)
+from tensorflow.keras.metrics import (
+    BinaryAccuracy, CategoricalAccuracy, SparseCategoricalAccuracy
+)
 from tensorflow.keras.optimizers import Adam
-from tensorflow.python.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras import optimizers as tfko
 import config
 from cnn_models.basic_cnn import create_basic_cnn_model
 from cnn_models.densenet121 import create_densenet121_model
@@ -20,6 +25,7 @@ from cnn_models.vgg19_common import create_vgg19_model_common
 from data_visualisation.csv_report import *
 from data_visualisation.plots import *
 from data_visualisation.roc_curves import *
+
 
 
 class CnnModel:
@@ -109,20 +115,33 @@ class CnnModel:
             plot_training_results(self.history, "Initial_training", is_frozen_layers=False)
 
     def compile_model(self, learning_rate) -> None:
-        """
-        Compile the CNN model.
-        Originally written as a group for the common pipeline. Later amended by Adam Jaamour.
-        :param learning_rate: The initial learning rate for the optimiser.
-        :return: None
-        """
-        if config.dataset == "CBIS-DDSM" or config.dataset == "mini-MIAS-binary":
-            self._model.compile(optimizer=Adam(learning_rate),
+        if config.dataset in ("CBIS-DDSM", "mini-MIAS-binary"):
+            self._model.compile(optimizer="adam",
                                 loss=BinaryCrossentropy(),
                                 metrics=[BinaryAccuracy()])
         elif config.dataset == "mini-MIAS":
-            self._model.compile(optimizer=Adam(learning_rate),
+            self._model.compile(optimizer="adam",
                                 loss=CategoricalCrossentropy(),
                                 metrics=[CategoricalAccuracy()])
+
+        # set LR after compile so we don't pass any foreign optimizer object
+        tf.keras.backend.set_value(self._model.optimizer.learning_rate, float(learning_rate))
+
+    # def compile_model(self, learning_rate) -> None:
+    #     """
+    #     Compile the CNN model.
+    #     Originally written as a group for the common pipeline. Later amended by Adam Jaamour.
+    #     :param learning_rate: The initial learning rate for the optimiser.
+    #     :return: None
+    #     """
+    #     if config.dataset == "CBIS-DDSM" or config.dataset == "mini-MIAS-binary":
+    #         self._model.compile(optimizer=Adam(learning_rate),
+    #                             loss=BinaryCrossentropy(),
+    #                             metrics=[BinaryAccuracy()])
+    #     elif config.dataset == "mini-MIAS":
+    #         self._model.compile(optimizer=Adam(learning_rate),
+    #                             loss=CategoricalCrossentropy(),
+    #                             metrics=[CategoricalAccuracy()])
 
     def fit_model(self, X_train, X_val, y_train, y_val, class_weights, is_frozen_layers: bool) -> None:
         """
@@ -255,25 +274,25 @@ class CnnModel:
         df['accuracy'] = pd.to_numeric(df['accuracy'])  # Digitize the accuracy column.
         plot_comparison_chart(df)
 
-    def save_model(self) -> None:
-        """
-        Saves the full model in h5 format.
-        Currently saves in lab machines scratch space.
-        :return: None
-        """
-        # Scratch space
-        self._model.save(
-            "../saved_models/dataset-{}_mammogramtype-{}_model-{}_lr-{}_b-{}_e1-{}_e2-{}_roi-{}_{}_saved-model.h5".format(
-                config.dataset,
-                config.mammogram_type,
-                config.model,
-                config.learning_rate,
-                config.batch_size,
-                config.max_epoch_frozen,
-                config.max_epoch_unfrozen,
-                config.is_roi,
-                config.name)
-        )
+    def save_model(self):
+        # pick a base folder (fallback: ./models)
+        base_dir = getattr(self, "_model_path", None) or getattr(self, "output_dir", None)
+        if not base_dir:
+            base_dir = os.path.join(os.getcwd(), "models")
+
+        # pick a name (fallback: class name)
+        name = getattr(self, "model_name", None) or getattr(self, "_name", None) or self.__class__.__name__
+
+        out_dir = os.path.join(base_dir, f"{name}_savedmodel")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Save in TensorFlow SavedModel format (robust to custom layers)
+        self._model.save(out_dir, save_format="tf")
+
+        # (optional) also save weights
+        self._model.save_weights(os.path.join(out_dir, "weights.h5"))
+
+        print(f"[save_model] Saved to: {out_dir}")
 
     def save_weights(self) -> None:
         """

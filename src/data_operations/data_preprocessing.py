@@ -4,10 +4,10 @@ from imutils import paths
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.utils import class_weight
+from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.preprocessing.image import img_to_array, load_img
 from tensorflow.keras.utils import to_categorical
-
+from .patient_splits import group_by_patient, split_patients
 import config
 
 
@@ -64,6 +64,73 @@ def import_cbisddsm_training_dataset(label_encoder):
     labels = encode_labels(df['label'].values, label_encoder)
     return list_IDs, labels
 
+def import_cbisddsm_patientwise_datasets(label_encoder, train=0.70, val=0.15, test=0.15, seed=42):
+    """
+    Build patient-wise, view-aware train/val/test from CBIS-DDSM CSVs.
+    Returns:
+      X_train, y_train, X_val, y_val, X_test, y_test  (paths and integer labels)
+    Behavior:
+      - Combines training.csv and testing.csv to create a single patient pool,
+        then splits by patient (leakage-safe).
+      - Writes the split manifests to ../data/CBIS-DDSM/splits/patientwise/{train,val,test}.csv
+    """
+
+    # Pick CSVs based on mammogram type
+    if config.mammogram_type == "calc":
+        tr = "../data/CBIS-DDSM/calc-training.csv"
+        te = "../data/CBIS-DDSM/calc-test.csv"
+    elif config.mammogram_type == "mass":
+        tr = "../data/CBIS-DDSM/mass-training.csv"
+        te = "../data/CBIS-DDSM/mass-test.csv"
+    else:
+        tr = "../data/CBIS-DDSM/training.csv"
+        te = "../data/CBIS-DDSM/testing.csv"
+
+    df_tr = pd.read_csv(tr)
+    df_te = pd.read_csv(te)
+
+    # Combine to form one pool (leakage-safe split across whole dataset)
+    df_all = pd.concat([df_tr, df_te], axis=0, ignore_index=True)
+
+    # Expect columns: img_path, label
+    paths = df_all["img_path"].astype(str).tolist()
+    raw_labels = df_all["label"].values
+    # encode to ints (0/1) consistently
+    y = encode_labels(raw_labels, label_encoder)
+
+    # Group by patient
+    pid_to_idx, pid_major_label = group_by_patient(paths, y)
+    pid_list = list(pid_to_idx.keys())
+
+    # Split patients
+    p_train, p_val, p_test = split_patients(pid_list, pid_major_label, train=train, val=val, test=test, seed=seed)
+
+    # Flatten indices per split
+    def flatten_idxs(pid_set):
+        idxs = []
+        for pid in pid_set:
+            idxs.extend(pid_to_idx[pid])
+        return sorted(idxs)
+
+    idx_train = flatten_idxs(p_train)
+    idx_val   = flatten_idxs(p_val)
+    idx_test  = flatten_idxs(p_test)
+
+    X_train = [paths[i] for i in idx_train]
+    y_train = [int(y[i]) for i in idx_train]
+    X_val   = [paths[i] for i in idx_val]
+    y_val   = [int(y[i]) for i in idx_val]
+    X_test  = [paths[i] for i in idx_test]
+    y_test  = [int(y[i]) for i in idx_test]
+
+    # Save manifests for reproducibility
+    out_dir = "../data/CBIS-DDSM/splits/patientwise"
+    os.makedirs(out_dir, exist_ok=True)
+    pd.DataFrame({"img_path": X_train, "label": y_train}).to_csv(os.path.join(out_dir, "train.csv"), index=False)
+    pd.DataFrame({"img_path": X_val,   "label": y_val}).to_csv(os.path.join(out_dir, "val.csv"),   index=False)
+    pd.DataFrame({"img_path": X_test,  "label": y_test}).to_csv(os.path.join(out_dir, "test.csv"),  index=False)
+
+    return np.array(X_train), np.array(y_train), np.array(X_val), np.array(y_val), np.array(X_test), np.array(y_test)
 
 def import_cbisddsm_testing_dataset(label_encoder):
     """
@@ -152,30 +219,46 @@ def dataset_stratified_split(split: float, dataset: np.ndarray, labels: np.ndarr
     return train_X, test_X, train_Y, test_Y
 
 
-def calculate_class_weights(y_train, label_encoder):
-    """
-    Calculate class  weights for imbalanced datasets.
-    """
-    if label_encoder.classes_.size != 2:
-        y_train = label_encoder.inverse_transform(np.argmax(y_train, axis=1))
 
-    # Balanced class weights
-    weights = class_weight.compute_class_weight("balanced",
-                                                np.unique(y_train),
-                                                y_train)
-    class_weights = dict(enumerate(weights))
 
-    # Manual class weights for CBIS-DDSM
-    #class_weights = {0: 1.0, 1:1.5}
 
-    # No class weights
-    #class_weights = None
+def calculate_class_weights(y, label_encoder=None):
+    y_np = np.asarray(y).ravel()
+    classes = np.unique(y_np)
+    # keyword-only args work on all recent sklearn versions
+    w = compute_class_weight(class_weight="balanced", classes=classes, y=y_np)
+    return {int(c): float(wi) for c, wi in zip(classes, w)}
 
-    if config.verbose_mode:
-        print("Class weights: {}".format(str(class_weights)))
 
-    # return class_weights
-    return None
+# def calculate_class_weights(y_train, label_encoder):
+#     """
+#     Calculate class  weights for imbalanced datasets.
+#     """
+#     if label_encoder.classes_.size != 2:
+#         y_train = label_encoder.inverse_transform(np.argmax(y_train, axis=1))
+
+#     # Balanced class weights
+#     weights = class_weight.compute_class_weight("balanced",
+#                                                 np.unique(y_train),
+#                                                 y_train)
+#     class_weights = dict(enumerate(weights))
+
+#     # Manual class weights for CBIS-DDSM
+#     #class_weights = {0: 1.0, 1:1.5}
+
+#     # No class weights
+#     #class_weights = None
+
+#     if config.verbose_mode:
+#         print("Class weights: {}".format(str(class_weights)))
+
+#     # return class_weights
+#     return None
+
+def make_patientwise_splits(images, labels,
+                            train=0.70, val=0.15, test=0.15, seed=42):
+    groups = group_by_patient(images, labels)
+    return split_patients(groups, train=train, val=val, test=test, seed=seed, stratify_on_label=True)
 
 
 def crop_roi_image(data_dir):

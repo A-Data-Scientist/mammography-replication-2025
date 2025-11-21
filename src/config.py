@@ -2,7 +2,8 @@
 Variables set by the command line arguments dictating which parts of the program to execute.
 Originally written as a group for the common pipeline. Later amended by Adam Jaamour.
 """
-
+import os
+CBIS_ROOT = r"D:/Projects/Mammography/mammography-replication-2025/data/CBIS-DDSM"
 # Constants
 RANDOM_SEED = 111
 MINI_MIAS_IMG_SIZE = {
@@ -36,3 +37,8 @@ is_roi = False              # Use cropped version of the images
 verbose_mode = False        # Boolean used to print additional logs for debugging purposes.
 name = ""                   # Name of experiment.
 # is_grid_search = False    # Run the grid search algorithm to determine the optimal hyper-parameters for the model.
+# Add sensible defaults if not present
+split_mode = "patient"
+train_frac = 0.70
+val_frac   = 0.15
+test_frac  = 0.15
