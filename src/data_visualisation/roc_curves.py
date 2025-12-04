@@ -1,3 +1,7 @@
+import os
+os.environ["MPLBACKEND"] = "Agg" 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import auc, roc_curve
@@ -6,7 +10,7 @@ import config
 from utils import save_output_figure
 
 
-def plot_roc_curve_binary(y_true: list, y_pred: list) -> None:
+def plot_roc_curve_binary(y_true: list, y_pred: list, prefix="") -> None:
     """
     Plot ROC curve for binary classification.
     Originally written as a group for the common pipeline.
@@ -30,13 +34,13 @@ def plot_roc_curve_binary(y_true: list, y_pred: list) -> None:
     plt.annotate('Random Guess', (.53, .48), color='navy')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('Receiver Operating Characteristic')
+    plt.title('Receiver Operating Characteristic {}'.format(prefix))
     plt.legend(loc='lower right')
-    save_output_figure("ROC-binary")
+    save_output_figure("ROC-binary", prefix)
     # plt.show()
 
 
-def plot_roc_curve_multiclass(y_true: list, y_pred: list, label_encoder) -> None:
+def plot_roc_curve_multiclass(y_true: list, y_pred: list, label_encoder, prefix="") -> None:
     """
     Plot ROC curve for multi classification.
 
@@ -104,7 +108,7 @@ def plot_roc_curve_multiclass(y_true: list, y_pred: list, label_encoder) -> None
     plt.annotate('Random Guess', (.53, .48), color='red')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('Receiver Operating Characteristic')
+    plt.title('Receiver Operating Characteristic {}'.format(prefix))
     plt.legend(loc='lower right')
-    save_output_figure("ROC-multi")
+    save_output_figure("ROC-multi", prefix)
     # plt.show()

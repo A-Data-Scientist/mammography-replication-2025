@@ -4,7 +4,12 @@ import os
 import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, log_loss, make_scorer
 from sklearn.preprocessing import LabelEncoder
+from calibration.temperature import (
+    fit_temperature_binary, apply_temperature_binary,
+    save_temperature, load_temperature
+)
 import tensorflow as tf
+from tensorflow.keras import backend as K
 from tensorflow.keras.losses import (
     BinaryCrossentropy, CategoricalCrossentropy, SparseCategoricalCrossentropy
 )
@@ -58,6 +63,19 @@ class CnnModel:
             self._model = create_mobilenet_model(self.num_classes)
         elif self.model_name == "CNN":
             self._model = create_basic_cnn_model(self.num_classes)
+        # Where to save artifacts (model, weights, temperature, etc.)
+        self.models_dir = getattr(config, "models_dir", os.path.join(os.getcwd(), "models"))
+        os.makedirs(self.models_dir, exist_ok=True)
+        # Canonical stem used by everyone (train/test)
+        self.artifact_stem = os.path.join(self.models_dir, f"{self.model_name}_{getattr(config, 'dataset', 'unknown')}")
+        self.run_tag = (getattr(config, "name", "") or
+                f"{config.dataset}_{config.model}_"
+                f"{getattr(config,'split_mode','patient')}_"
+                f"{getattr(config,'preprocess','none')}_"
+                f"{getattr(config,'loss_type','weighted_ce')}"
+                f"{'_cal' if getattr(config,'calibrate', False) else ''}")
+    
+    def get_run_tag(self): return (self.run_tag + "_") if self.run_tag else ""
 
     def train_model(self, X_train, X_val, y_train, y_val, class_weights) -> None:
         """
@@ -91,7 +109,7 @@ class CnnModel:
             self.fit_model(X_train, X_val, y_train, y_val, class_weights, is_frozen_layers=True)
 
             # Plot the training loss and accuracy.
-            plot_training_results(self.history, "Initial_training", is_frozen_layers=True)
+            plot_training_results(self.history, "Initial_training", is_frozen_layers=True, prefix=self.get_run_tag())
 
             # Unfreeze all layers.
             if self.model_name == "VGG":
@@ -106,26 +124,64 @@ class CnnModel:
             self.fit_model(X_train, X_val, y_train, y_val, class_weights, is_frozen_layers=False)
 
             # Plot the training loss and accuracy.
-            plot_training_results(self.history, "Fine_tuning_training", is_frozen_layers=False)
+            plot_training_results(self.history, "Fine_tuning_training", is_frozen_layers=False, prefix=self.get_run_tag())
 
         # Small CNN (no transfer learning).
         else:
             self.compile_model(config.learning_rate)
             self.fit_model(X_train, X_val, y_train, y_val, class_weights, is_frozen_layers=True)
-            plot_training_results(self.history, "Initial_training", is_frozen_layers=False)
+            plot_training_results(self.history, "Initial_training",  is_frozen_layers=True,  prefix=self.get_run_tag())
 
+    
     def compile_model(self, learning_rate) -> None:
-        if config.dataset in ("CBIS-DDSM", "mini-MIAS-binary"):
-            self._model.compile(optimizer="adam",
-                                loss=BinaryCrossentropy(),
-                                metrics=[BinaryAccuracy()])
-        elif config.dataset == "mini-MIAS":
-            self._model.compile(optimizer="adam",
-                                loss=CategoricalCrossentropy(),
-                                metrics=[CategoricalAccuracy()])
+        # choose optimizer (you can keep adam and set LR after compile as you do)
+        opt = "adam"
 
-        # set LR after compile so we don't pass any foreign optimizer object
+        if config.dataset in ("CBIS-DDSM", "mini-MIAS-binary"):
+            # choose loss based on ablation setting
+            loss_type = getattr(config, "loss_type", "weighted_ce")  # "weighted_ce" or "focal"
+            if loss_type == "focal":
+                alpha = float(getattr(config, "focal_alpha", 0.25))
+                gamma = float(getattr(config, "focal_gamma", 2.0))
+                print("[debug] focal alpha =", alpha, "gamma =", gamma)
+                loss_fn = make_binary_focal_loss(alpha=alpha, gamma=gamma)
+            else:
+                loss_fn = BinaryCrossentropy()
+
+            self._model.compile(
+                optimizer=opt,
+                loss=loss_fn,
+                metrics=[BinaryAccuracy()]
+            )
+
+        elif config.dataset == "mini-MIAS":
+            # multiclass path unchanged
+            self._model.compile(
+                optimizer=opt,
+                loss=CategoricalCrossentropy(),
+                metrics=[CategoricalAccuracy()]
+            )
+
+        # set LR after compile (keeps your existing behavior)
         tf.keras.backend.set_value(self._model.optimizer.learning_rate, float(learning_rate))
+
+    
+    
+    
+    
+    # def compile_model(self, learning_rate) -> None:
+    #     if config.dataset in ("CBIS-DDSM", "mini-MIAS-binary"):
+    #         self._model.compile(optimizer="adam",
+    #                             loss=BinaryCrossentropy(),
+    #                             metrics=[BinaryAccuracy()])
+    #     elif config.dataset == "mini-MIAS":
+    #         self._model.compile(optimizer="adam",
+    #                             loss=CategoricalCrossentropy(),
+    #                             metrics=[CategoricalAccuracy()])
+
+    #     # set LR after compile so we don't pass any foreign optimizer object
+    #     tf.keras.backend.set_value(self._model.optimizer.learning_rate, float(learning_rate))
+
 
     # def compile_model(self, learning_rate) -> None:
     #     """
@@ -239,23 +295,25 @@ class CnnModel:
         accuracy = float('{:.4f}'.format(accuracy_score(y_true_inv, y_pred_inv)))
         print("Accuracy = {}\n".format(accuracy))
 
+        prefix = self.get_run_tag()
+        
         # Generate CSV report.
         generate_csv_report(y_true_inv, y_pred_inv, label_encoder, accuracy)
         generate_csv_metadata(runtime)
 
         # Plot confusion matrix and normalised confusion matrix.
         cm = confusion_matrix(y_true_inv, y_pred_inv)  # Calculate CM with original label of classes
-        plot_confusion_matrix(cm, 'd', label_encoder, False)
+        plot_confusion_matrix(cm, 'd', label_encoder, False, prefix=prefix)
         # Calculate normalized confusion matrix with original label of classes.
         cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
         cm_normalized[np.isnan(cm_normalized)] = 0
-        plot_confusion_matrix(cm_normalized, '.2f', label_encoder, True)
+        plot_confusion_matrix(cm_normalized, '.2f', label_encoder, True, prefix=prefix)
 
         # Plot ROC curve.
         if label_encoder.classes_.size == 2:  # binary classification
-            plot_roc_curve_binary(y_true, self.prediction)
+            plot_roc_curve_binary(y_true, self.prediction, prefix=prefix)
         elif label_encoder.classes_.size >= 2:  # multi classification
-            plot_roc_curve_multiclass(y_true, self.prediction, label_encoder)
+            plot_roc_curve_multiclass(y_true, self.prediction, label_encoder, prefix=prefix)
 
         # Compare results with other similar papers' result.
         with open(
@@ -272,24 +330,20 @@ class CnnModel:
                                index=[0])  # Add model result into dataframe to compare.
         df = pd.concat([new_row, df]).reset_index(drop=True)
         df['accuracy'] = pd.to_numeric(df['accuracy'])  # Digitize the accuracy column.
-        plot_comparison_chart(df)
+        plot_comparison_chart(df, prefix=prefix)
 
     def save_model(self):
-        # pick a base folder (fallback: ./models)
-        base_dir = getattr(self, "_model_path", None) or getattr(self, "output_dir", None)
-        if not base_dir:
-            base_dir = os.path.join(os.getcwd(), "models")
-
-        # pick a name (fallback: class name)
-        name = getattr(self, "model_name", None) or getattr(self, "_name", None) or self.__class__.__name__
-
-        out_dir = os.path.join(base_dir, f"{name}_savedmodel")
+        """
+        Save in a stable folder derived from artifact_stem, so other components
+        (temperature saving/loading, test-time eval) can find it deterministically.
+        """
+        out_dir = f"{self.artifact_stem}_savedmodel"
         os.makedirs(out_dir, exist_ok=True)
+        self._savedmodel_dir = out_dir  # remember for debugging if needed
 
-        # Save in TensorFlow SavedModel format (robust to custom layers)
+        # SavedModel (robust to custom layers)
         self._model.save(out_dir, save_format="tf")
-
-        # (optional) also save weights
+        # Also save weights (optional)
         self._model.save_weights(os.path.join(out_dir, "weights.h5"))
 
         print(f"[save_model] Saved to: {out_dir}")
@@ -375,27 +429,44 @@ class CnnModel:
         self._model.layers[2].set_weights(weights)
 
 
-@property
-def model(self):
-    """
-    CNN model getter.
-    :return: the model.
-    """
-    return self._model
+
+    def save_temperature_param(self, base_out_path_no_ext=None):
+        stem = base_out_path_no_ext or self.artifact_stem
+        if getattr(self, "_temperature_", None) is not None:
+            save_temperature(stem, self._temperature_,
+                                suffix=getattr(config, "calibration_file_suffix", "_temperature.json"))
+
+    def load_temperature_param(self, base_out_path_no_ext=None):
+        stem = base_out_path_no_ext or self.artifact_stem
+        T = load_temperature(stem, suffix=getattr(config, "calibration_file_suffix", "_temperature.json"))
+        self._temperature_ = T
+
+    def get_artifact_stem(self):
+        return self.artifact_stem
 
 
-@model.setter
-def model(self, value) -> None:
-    """
-    CNN model setter.
-    :param value:
-    :return: None
-    """
-    pass
+
+    @property
+    def model(self):
+        """
+        CNN model getter.
+        :return: the model.
+        """
+        return self._model
+
+
+    @model.setter
+    def model(self, value) -> None:
+        """
+        CNN model setter.
+        :param value:
+        :return: None
+        """
+        pass
 
 
 def test_model_evaluation(y_true: list, predictions, label_encoder: LabelEncoder, classification_type: str,
-                          runtime) -> None:
+                          runtime, threshold = 0.5) -> None:
     """
     Function to evaluate a loaded model not instantiated with the CnnModel class.
     :param y_true: Ground truth of the data in one-hot-encoding type.
@@ -406,10 +477,16 @@ def test_model_evaluation(y_true: list, predictions, label_encoder: LabelEncoder
     :param runtime: Runtime in seconds.
     :return: None.
     """
+    prefix = ( (getattr(config, "name", "") or
+           f"{config.dataset}_{config.model}_"
+           f"{getattr(config,'split_mode','patient')}_"
+           f"{getattr(config,'preprocess','none')}_"
+           f"{getattr(config,'loss_type','weighted_ce')}"
+           f"{'_cal' if getattr(config,'calibrate', False) else ''}") + "_test_" )
     # Inverse transform y_true and y_pred from one-hot-encoding to original label.
     if label_encoder.classes_.size == 2:
         y_true_inv = y_true
-        y_pred_inv = np.round_(predictions, 0)
+        y_pred_inv = (predictions >= threshold).astype(int)
     else:
         y_true_inv = label_encoder.inverse_transform(np.argmax(y_true, axis=1))
         y_pred_inv = label_encoder.inverse_transform(np.argmax(predictions, axis=1))
@@ -424,17 +501,17 @@ def test_model_evaluation(y_true: list, predictions, label_encoder: LabelEncoder
 
     # Plot confusion matrix and normalised confusion matrix.
     cm = confusion_matrix(y_true_inv, y_pred_inv)  # Calculate CM with original label of classes
-    plot_confusion_matrix(cm, 'd', label_encoder, False)
+    plot_confusion_matrix(cm, 'd', label_encoder, False, prefix=prefix)
     # Calculate normalized confusion matrix with original label of classes.
     cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     cm_normalized[np.isnan(cm_normalized)] = 0
-    plot_confusion_matrix(cm_normalized, '.2f', label_encoder, True)
+    plot_confusion_matrix(cm_normalized, '.2f', label_encoder, True, prefix=prefix)
 
     # Plot ROC curve.
     if label_encoder.classes_.size == 2:  # binary classification
-        plot_roc_curve_binary(y_true, predictions)
+        plot_roc_curve_binary(y_true, predictions, prefix=prefix)
     elif label_encoder.classes_.size >= 2:  # multi classification
-        plot_roc_curve_multiclass(y_true, predictions, label_encoder)
+        plot_roc_curve_multiclass(y_true, predictions, label_encoder, prefix=prefix)
 
     # Compare results with other similar papers' result.
     with open(
@@ -451,4 +528,20 @@ def test_model_evaluation(y_true: list, predictions, label_encoder: LabelEncoder
                            index=[0])  # Add model result into dataframe to compare.
     df = pd.concat([new_row, df]).reset_index(drop=True)
     df['accuracy'] = pd.to_numeric(df['accuracy'])  # Digitize the accuracy column.
-    plot_comparison_chart(df)
+    plot_comparison_chart(df, prefix)
+
+
+
+
+
+
+    
+def make_binary_focal_loss(alpha=0.25, gamma=2.0):
+    def _focal(y_true, y_pred):
+        # y_pred are probabilities (after sigmoid)
+        eps = K.epsilon()
+        y_pred = K.clip(y_pred, eps, 1.0 - eps)
+        pt = tf.where(K.equal(y_true, 1), y_pred, 1 - y_pred)
+        w  = tf.where(K.equal(y_true, 1), alpha, 1 - alpha)
+        return K.mean(-w * K.pow(1.0 - pt, gamma) * K.log(pt))
+    return _focal

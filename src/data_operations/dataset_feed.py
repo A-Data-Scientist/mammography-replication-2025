@@ -4,6 +4,10 @@ import numpy as np
 import pydicom
 import glob
 import config
+import cv2
+
+
+
 
 def _to_str(x):
     # handles TF EagerTensor, bytes, str
@@ -115,6 +119,17 @@ def _load_dicom_py(filename):
         arr = (arr - mn) / (mx - mn)
     else:
         arr[:] = 0.0
+
+    if getattr(config, "use_clahe", False):
+        # arr is float32 [0,1]; convert to uint8, apply CLAHE, back to float32 [0,1]
+        arr_u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        # OpenCV expects 2D; if arr is 2D we're fine
+        clip = float(getattr(config, "clahe_clip_limit", 2.0))
+        tiles = getattr(config, "clahe_tile_grid", (8, 8))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=tiles)
+        arr_u8 = clahe.apply(arr_u8)
+        arr = arr_u8.astype(np.float32) / 255.0
+
 
     # Add channel axis -> H x W x 1
     arr = np.expand_dims(arr, axis=-1).astype(np.float32)

@@ -1,3 +1,7 @@
+import os
+os.environ["MPLBACKEND"] = "Agg" 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from numpy.random import seed
 from sklearn.preprocessing import LabelEncoder
@@ -79,14 +83,14 @@ def print_cli_arguments() -> None:
     print("Experiment name: {}\n".format(config.name))
 
 
-def save_output_figure(title: str) -> None:
+def save_output_figure(title: str, prefix="") -> None:
     """
     Save a figure on the output directory.
     :param title: The title of the figure.
     :return: None
     """
     plt.savefig(
-        "../output/{}_dataset-{}_mammogramtype-{}_model-{}_lr-{}_b-{}_e1-{}_e2-{}_roi-{}_{}_{}.png".format(
+        "../output/{}_dataset-{}_mammogramtype-{}_model-{}_lr-{}_b-{}_e1-{}_e2-{}_roi-{}_{}_{}_{}.png".format(
             config.run_mode,
             config.dataset,
             config.mammogram_type,
@@ -97,7 +101,8 @@ def save_output_figure(title: str) -> None:
             config.max_epoch_unfrozen,
             config.is_roi,
             config.name,
-            title))  # bbox_inches='tight'
+            title,
+            prefix))  # bbox_inches='tight'
 
 
 def load_trained_model() -> None:

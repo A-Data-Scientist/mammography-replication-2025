@@ -37,6 +37,17 @@ is_roi = False              # Use cropped version of the images
 verbose_mode = False        # Boolean used to print additional logs for debugging purposes.
 name = ""                   # Name of experiment.
 # is_grid_search = False    # Run the grid search algorithm to determine the optimal hyper-parameters for the model.
+preprocess = "none"         # Preprocessing: "none" or "clahe"
+
+# Loss: "weighted_ce" or "focal"
+loss_type = "weighted_ce"
+focal_alpha = 0.25
+focal_gamma = 2.0
+
+# Calibration
+calibrate = True
+calibration_file_suffix = "_temperature.json"
+
 # Add sensible defaults if not present
 split_mode = "patient"
 train_frac = 0.70
