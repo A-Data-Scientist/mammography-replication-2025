@@ -1,3 +1,375 @@
+# Mammography Replication 2025
+
+This repository contains a replication and extension of the PLOS ONE paper:
+
+> Jaamour A, Myles C, Patel A, Chen SJ, McMillan L, Harris-Birtill D.  
+> *A divide and conquer approach to maximize deep learning mammography classification accuracies.* PLOS ONE, 2023.
+
+The original work provides a transparent, open-source pipeline for training and evaluating CNN backbones on the CBIS-DDSM mammography dataset. This fork keeps the same core pipeline and **MobileNetV2** backbone, but adds:
+
+- **Patient-wise, view-aware splitting** for CBIS-DDSM (no patient leakage across splits).
+- **Post-hoc probability calibration** via temperature scaling, with Brier, ECE, and reliability plots.
+- A **2×2 ablation** over preprocessing (`none` vs `clahe`) and loss (`weighted_ce` vs `focal`).
+- An **implementation sweep** mode to reproduce the four main configurations discussed in the 2025 write-up.
+
+The goal is not to invent a new architecture, but to show how evaluation and training choices (splits, calibration, and simple ablations) affect the *clinical reliability* of a lightweight mammography model.
+
+---
+
+## Repository structure (high-level)
+
+- `src/`
+  - `main.py` – entry point for training and testing experiments.
+  - `cnn_models/` – backbone definitions (e.g., `mobilenet_v2.py`).
+  - `data_operations/` – dataset loading, splitting, preprocessing, transforms.
+  - `data_visualisation/` – plotting scripts (training curves, confusion matrices, ROC, calibration).
+  - `calibration/temperature.py` – temperature scaling (fit, apply, save, load).
+  - `config.py` – global configuration (dataset paths, hyperparameters).
+  - `utils.py` – utility functions (logging, file saving, etc.).
+- `data/`
+  - `CBIS-DDSM/` – split manifests and metadata CSVs.
+  - `mini-MIAS/` – optional mini-MIAS assets (if used).
+- `models/` – SavedModel exports and temperature JSON files.
+- `saved_models/` – legacy HDF5 weights (from original code).
+- `output/` – training curves and evaluation plots (confusion matrices, ROC).
+- `reports/calibration/` – reliability diagrams and calibration reports.
+- `debug_preds/` – `.npz` files containing validation labels and probabilities.
+
+---
+
+## Environment setup and usage
+
+### 1. Clone this repository
+
+```bash
+git clone https://github.com/A-Data-Scientist/mammography-replication-2025.git
+cd mammography-replication-2025
+```
+
+### 2. Create a Python environment
+
+Use `conda` or `venv`. The code has been tested with Python 3.8–3.10.
+
+```bash
+conda create -n mammography python=3.9
+conda activate mammography
+```
+
+or
+
+```bash
+python -m venv .venv
+# Linux / macOS:
+source .venv/bin/activate
+# Windows:
+# .venv\Scripts\activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Create output directories
+
+Several scripts expect output locations to exist. From the repo root:
+
+```bash
+mkdir -p output
+mkdir -p saved_models
+mkdir -p models
+mkdir -p reports/calibration
+mkdir -p debug_preds
+```
+
+- `output/` – training curves and comparison plots  
+- `saved_models/` – legacy weight dumps from the original project  
+- `models/` – SavedModel exports and temperature JSON (`*_temperature.json`)  
+- `reports/calibration/` – reliability diagrams + calibration metrics  
+- `debug_preds/` – label/probability dumps for analysis
+
+---
+
+## Datasets
+
+### CBIS-DDSM
+
+This project primarily targets **CBIS-DDSM** for benign vs malignant classification.
+
+1. Download the CBIS-DDSM dataset from TCIA.
+2. Arrange DICOMs in a directory tree compatible with the paths referenced in `data/CBIS-DDSM` manifests, or set `config.CBIS_ROOT` to point to your local CBIS-DDSM root.
+3. Split manifests (`train/val/test` CSV files) are managed under `data/CBIS-DDSM`. This fork adds **patient-wise, view-aware splits** on top of the original file-level splits.
+
+### mini-MIAS (optional)
+
+The original code supports **mini-MIAS** and a **mini-MIAS-binary** task. For the 2025 replication, CBIS-DDSM + MobileNetV2 is the primary focus, but the mini-MIAS code paths remain in place.
+
+See the original project’s instructions or `data/mini-MIAS` for more details on downloading and converting mini-MIAS if you need it.
+
+---
+
+## Running experiments
+
+All commands below assume you are in the `src/` directory:
+
+```bash
+cd src
+python main.py -h
+```
+
+Key arguments:
+
+- `-d, --dataset` – `CBIS-DDSM`, `mini-MIAS`, or `mini-MIAS-binary` (default: `CBIS-DDSM`)
+- `-mt, --mammogramtype` – `calc`, `mass`, or `all` (default: `all`)
+- `-m, --model` – `VGG-common`, `VGG`, `ResNet`, `Inception`, `DenseNet`, `MobileNet`, `CNN`
+- `-r, --runmode` – `train` or `test` (default: `train`)
+- `--split_mode` – `classic` (file-level) or `patient` (patient-wise), CBIS-DDSM only
+- `--preprocess` – `none` or `clahe`
+- `--loss-type` – `weighted_ce` or `focal`
+- `--calibrate` – if present, fit and apply **temperature scaling** after training
+- `--impl-sweep` – run the four main MobileNetV2 configurations used in the 2025 replication
+
+Other arguments (e.g., `--learning-rate`, `--batchsize`, `--splits`) inherit defaults from the original code. For most reproductions you can leave them unchanged.
+
+---
+
+## 1. Implementation sweep (recommended)
+
+The **implementation sweep** runs the four main configurations discussed in the accompanying report for MobileNetV2 on CBIS-DDSM:
+
+1. Classic file-level split, no calibration  
+2. Patient-wise, no calibration  
+3. Patient-wise + calibration  
+4. Patient-wise + CLAHE + focal loss + calibration  
+
+Run:
+
+```bash
+cd src
+
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r train \
+  --impl-sweep
+```
+
+This is equivalent to sequentially running:
+
+1. `classic, prep=none, loss=weighted_ce, cal=False`  
+2. `patient, prep=none, loss=weighted_ce, cal=False`  
+3. `patient, prep=none, loss=weighted_ce, cal=True`  
+4. `patient, prep=clahe, loss=focal, cal=True`  
+
+For each configuration, the script will:
+
+- Train the MobileNetV2 model with the chosen split / preprocessing / loss.
+- Log training and validation accuracy/loss to `output/`.
+- Compute validation accuracy (manual + streaming `BinaryAccuracy`).
+- Generate a **calibration report**:
+  - ROC-AUC, PR-AUC
+  - Brier score, ECE, MCE
+  - Reliability diagrams saved to `reports/calibration/`.
+- Compute confusion matrices and ROC curves via `test_model_evaluation` and save them to `output/`.
+- Dump validation labels + probabilities to `debug_preds/*.npz` for offline analysis.
+
+At the end you will see a summary similar to:
+
+```text
+=== Validation Accuracy Summary (CBIS-DDSM) ===
+classic, prep=none, loss=weighted_ce, cal=False           Acc (uncal): 0.5915
+patient, prep=none, loss=weighted_ce, cal=False           Acc (uncal): 0.6300
+patient, prep=none, loss=weighted_ce, cal=True            Acc (uncal): 0.6300 | Acc (cal): 0.6300
+patient, prep=clahe, loss=focal, cal=True                 Acc (uncal): 0.6645 | Acc (cal): 0.6645
+```
+
+Use this sweep to reproduce the **baseline**, **patient-wise**, **calibrated**, and **CLAHE × loss** results and plots from the paper.
+
+---
+
+## 2. Single-run experiments
+
+You can also run individual configurations directly by setting the flags explicitly.
+
+### 2.1 Classic file-level baseline (uncalibrated)
+
+```bash
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r train \
+  --split_mode classic \
+  --preprocess none \
+  --loss-type weighted_ce
+```
+
+This will:
+
+- Reproduce the original file-level MobileNetV2 baseline.
+- Save training curves and confusion matrices + ROC under `output/`.
+- Produce an **uncalibrated** calibration report:
+
+  - `reports/calibration/cbis_val_classic_none_weighted_ce_reliability.png`
+
+### 2.2 Patient-wise, view-aware split (uncalibrated)
+
+```bash
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r train \
+  --split_mode patient \
+  --preprocess none \
+  --loss-type weighted_ce
+```
+
+This configuration:
+
+- Enforces patient-wise, view-aware splits with no calibration.
+- Saves patient-wise confusion matrices and ROC to `output/`.
+- Generates uncalibrated reliability plots with tag `cbis_val_patient_none_weighted_ce`.
+
+### 2.3 Patient-wise + calibration
+
+```bash
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r train \
+  --split_mode patient \
+  --preprocess none \
+  --loss-type weighted_ce \
+  --calibrate
+```
+
+This configuration:
+
+- Trains as above, then **fits a temperature parameter T** on validation logits.
+- Applies T to validation and test outputs.
+- Saves T under:
+
+  ```text
+  models/MobileNet_CBIS-DDSM*_temperature.json
+  ```
+
+- Produces **uncalibrated** and **calibrated** reliability diagrams:
+
+  - `cbis_val_patient_none_weighted_ce_reliability.png` (uncalibrated)
+  - `cbis_val_patient_none_weighted_ce_cal_reliability.png` (calibrated)
+
+Accuracy at a 0.5 threshold is unchanged by design; improvements appear in **Brier score, ECE, and reliability curves**.
+
+### 2.4 Patient-wise + CLAHE + focal + calibration (best configuration)
+
+This is the “best” configuration reported in the 2025 replication write-up:
+
+```bash
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r train \
+  --split_mode patient \
+  --preprocess clahe \
+  --loss-type focal \
+  --calibrate
+```
+
+It will:
+
+- Train MobileNetV2 on patient-wise splits using **CLAHE** and **focal loss**.
+- Fit and apply temperature scaling.
+- Save:
+  - Training curves (initial + fine-tuning) under `output/`.
+  - Confusion matrices (raw and normalized) and ROC curves for this configuration.
+  - Reliability diagrams and calibration metrics under `reports/calibration/`.
+  - Temperature parameter and model artifacts under `models/`.
+
+In our experiments, this setup achieved the highest patient-wise test accuracy (~0.6645) among the evaluated combinations.
+
+---
+
+## 3. Test mode (evaluating a saved model)
+
+To evaluate a previously trained model and its calibration on the test subset, use `-r test`. For example, to test the patient-wise + CLAHE + focal configuration:
+
+```bash
+python main.py \
+  -d CBIS-DDSM \
+  -mt all \
+  -m MobileNet \
+  -r test \
+  --split_mode patient \
+  --preprocess clahe \
+  --loss-type focal
+```
+
+In `test` mode:
+
+- The SavedModel is loaded from `models/` using `load_trained_model`.
+- The code attempts to load a saved temperature JSON:
+  - If found, probabilities are **calibrated** with T.
+  - If not, raw probabilities are used.
+- Test-set confusion matrices, ROC curves, and calibration reports are written to the same locations as in train mode.
+
+> Note: You do **not** pass `--calibrate` in `test` mode. That flag is only used when fitting T during training.
+
+---
+
+## 4. Recreating figures from the paper
+
+The figures in the DS 340W paper (training curves, confusion matrices, ROC curves, reliability diagrams, accuracy comparison bar charts) can be recreated from the plots generated by:
+
+- `python main.py ... --impl-sweep` (for all four key configurations), and/or  
+- Individual `train` and `test` runs as described above.
+
+Typical mapping:
+
+- **Training curves** – saved under `output/dataset-CBIS-DDSM_model-MobileNet_*Training-Accuracy.png` and `*-Loss.png`.
+- **Confusion matrices** – generated by `test_model_evaluation` into `output/` with prefixes like `CM_...` and `CM-normalised_...`.
+- **ROC curves** – saved as `ROC_...` PNGs under `output/`.
+- **Reliability diagrams** – saved under `reports/calibration/` as `cbis_val_*_reliability.png` (uncalibrated) and `*_cal_reliability.png` (calibrated).
+- **Accuracy comparison bar charts** – produced in `output/` with labels like `Accuracy Comparison_*`.
+
+You can then embed these PNGs into a report or presentation as needed.
+
+---
+
+## Acknowledgements
+
+This work builds directly on the open-source code from the original PLOS ONE paper:
+
+> Jaamour A, Myles C, Patel A, Chen SJ, McMillan L, Harris-Birtill D.  
+> *A divide and conquer approach to maximize deep learning mammography classification accuracies.* PLOS ONE, 2023.
+
+It is also informed by evaluation practices from:
+
+- A nationwide AI deployment study in **Nature Medicine** (calibrated, transportable mammography AI).  
+- The **MASAI** randomized screening trial in **The Lancet Digital Health** (AI-supported screening with prospectively defined operating points).
+
+
+
+
+
+
+
+----------------------------------------------------------------------------------------------------------------------
+
+Original Repo README
+
+
+
+
+
+
+
+
+
 # A Divide and Conquor Approach to Maximise Deep Learning Mammography Classification Accuracies - Published in PLOS ONE [![License](https://img.shields.io/badge/License-BSD_2--Clause-orange.svg?style=for-the-badge)](https://opensource.org/licenses/BSD-2-Clause) ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) ![Jupyter Notebook](https://img.shields.io/badge/jupyter-%23FA0F00.svg?style=for-the-badge&logo=jupyter&logoColor=white)
 
 
